@@ -155,7 +155,7 @@ class HoldemTable(Env):
         self.funds_history = None
         self.array_everything = None
         self.legal_moves = None
-        self.illegal_move_reward = -1
+        self.illegal_move_reward = -1e5
         self.action_space = Discrete(len(Action) - 2)
         self.first_action_for_hand = None
 
