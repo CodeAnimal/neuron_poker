@@ -179,8 +179,6 @@ class HoldemTable(Env):
                                         total_cycles_to_raise=self.max_round_raising, max_cycles_total=self.max_actions_rounds)
         self._start_new_hand()
         self._get_environment()
-        # auto play for agents where autoplay is set
-        self._auto_play()
 
         return self.array_everything
 
@@ -515,6 +513,7 @@ class HoldemTable(Env):
             self.legal_moves = [Action.BIG_BLIND]
             self._process_decision(Action.BIG_BLIND)
             self._next_player()
+            self._auto_play()
 
         elif self.stage in [Stage.FLOP, Stage.TURN, Stage.RIVER]:
             self._next_player()
@@ -754,7 +753,7 @@ class PlayerCycle:
         self.size = len(lst)
         self.max_cycles_total = max_cycles_total
         self.last_raiser_step = None
-        self.max_steps_after_last_raiser = self.size
+        self.max_steps_after_last_raiser = self.size - 1
         self.max_steps_after_big_blind = max_steps_after_big_blind
         self.max_steps_total = None
         self.step_counter = 0
@@ -859,7 +858,6 @@ class PlayerCycle:
 
     def mark_bb(self):
         """Ensure bb can raise"""
-        self.last_raiser_step = self.step_counter
         self.max_steps_when_no_raiser = self.size + 2  # plus 2 so that the BB has chance to raise
         self.max_steps_total = self.max_steps_total + 2 if self.max_steps_total else None
         # self.max_steps_total = self.step_counter + self.max_steps_total if self.max_steps_total else None
