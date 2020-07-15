@@ -17,6 +17,7 @@ class Player:
         self.min_bet_equity = min_bet_equity
 
         self.autoplay = True
+        self.equity_player = True
 
     def action(self, action_space, observation, info):  # pylint: disable=no-self-use
         """Mandatory method that calculates the move based on the observation array and the action space."""

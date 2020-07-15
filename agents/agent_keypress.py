@@ -14,6 +14,7 @@ class Player:
         self.temp_stack = []
         self.name = name
         self.autoplay = True
+        self.equity_player = False
 
     def action(self, action_space, observation, info):  # pylint: disable=no-self-use
         """Mandatory method that calculates the move based on the observation array and the action space."""

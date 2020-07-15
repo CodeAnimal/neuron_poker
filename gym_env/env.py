@@ -156,7 +156,6 @@ class HoldemTable(Env):
         self.info = None
         self.done = False
         self.funds_history = None
-        self.array_everything = None
         self.legal_moves = None
         self.illegal_move_reward = -1e5
         self.action_space = Discrete(len(Action) - 2)
@@ -178,11 +177,11 @@ class HoldemTable(Env):
         self.player_cycle = PlayerCycle(self.players, dealer_idx=self.dealer_pos - 1,
                                         total_cycles_to_raise=self.max_round_raising, max_cycles_total=self.max_actions_rounds)
         self._start_new_hand()
-        self._get_environment()
         # auto play for agents where autoplay is set
         self._auto_play()
 
-        return self.array_everything
+        self._load_observations()
+        return self.observation
 
     def step(self, action):  # pylint: disable=arguments-differ
         """
@@ -200,10 +199,10 @@ class HoldemTable(Env):
         if self._agent_is_autoplay():
             self._auto_play()
         else:  # action received from player shell (e.g. keras rl, not autoplay)
-            self._get_environment()  # get legal moves
+            self._get_legal_moves()
             self._execute_step(Action(action), self.player_cycle.idx)
 
-        return self.array_everything, self.reward, self.done, self.info
+        return self.observation, self.reward, self.done, self.info
 
     def _execute_step(self, action, acting_agent_idx):
         if Action(action) not in self.legal_moves:
@@ -221,10 +220,10 @@ class HoldemTable(Env):
             if self.calculating_reward:
                 self.stop_autoplay = True
 
-        self._get_environment()
-
         if self.first_action_for_hand[acting_agent_idx] or self.done:
             self.first_action_for_hand[acting_agent_idx] = False
+
+        self._load_observations()
 
         if not self.calculating_reward and not self._agent_is_autoplay(acting_agent_idx):
             if self.stage not in [Stage.END_HIDDEN, Stage.SHOWDOWN]:
@@ -236,9 +235,10 @@ class HoldemTable(Env):
                                    action_data=action_data)
 
     def _get_action_data(self):
+        player = self._get_current_player()
         return ActionData(
-            player_stack=self.current_player.stack,
-            player_pot=self.player_pots[self.current_player.seat],
+            player_stack=player.stack,
+            player_pot=self.player_pots[player.seat],
             round_pot=self.current_round_pot,
             community_pot=self.community_pot
         )
@@ -246,7 +246,7 @@ class HoldemTable(Env):
     def _auto_play(self):
         while not self.stop_autoplay and not self.done and self._agent_is_autoplay():
             log.debug("Autoplay agent. Call action method of agent.")
-            self._get_environment()
+            self._load_observations()
             # call agent's action method
             action = self.current_player.agent_obj.action(self.legal_moves, self.observation, self.info)
             self._execute_step(Action(action), self.player_cycle.idx)
@@ -262,15 +262,50 @@ class HoldemTable(Env):
             return hasattr(self.current_player.agent_obj, 'autoplay')
         return hasattr(self.players[idx].agent_obj, 'autoplay')
 
-    def _get_environment(self):
+    def _load_observations(self):
         """Observe the environment"""
         if not self.done:
             self._get_legal_moves()
 
         self.observation = None
-        self.reward = 0
         self.info = None
 
+        self._update_player_data()
+        self._update_community_data()
+
+        player_data_arr = np.array(list(flatten(self.player_data.__dict__.values())))
+        community_data_arr = np.array(list(flatten(self.community_data.__dict__.values())))
+        stage_data_arr = np.array([list(flatten(sd.__dict__.values())) for sd in self.stage_data]).flatten()
+        self.observation = np.concatenate([player_data_arr, community_data_arr, stage_data_arr]).flatten()
+
+        self._get_legal_moves()
+
+        self.info = {'player_data': self.player_data.__dict__,
+                     'community_data': self.community_data.__dict__,
+                     'stage_data': [stage.__dict__ for stage in self.stage_data],
+                     'legal_moves': self.legal_moves}
+
+        self.observation_space = self.observation.shape
+
+        if self.render_switch:
+            self.render()
+
+    def _update_player_data(self):
+        self.player_data = PlayerData()
+        self.player_data.stack = [player.stack / (self.big_blind * 100) for player in self.players]
+        current_player = self._get_current_player()
+        self.player_data.position = current_player.seat
+        self._update_player_data_equity()
+
+    def _update_player_data_equity(self):
+        current_player = self._get_current_player()
+        current_player.equity_alive = 0
+        if hasattr(current_player, "equity_player") and current_player.equity_player:
+            current_player.equity_alive = self.get_equity(set(current_player.cards), set(self.table_cards),
+                                                          sum(self.player_cycle.alive), 1000)
+        self.player_data.equity_to_river_alive = current_player.equity_alive
+
+    def _update_community_data(self):
         self.community_data = CommunityData(len(self.players))
         self.community_data.community_pot = self.community_pot / (self.big_blind * 100)
         self.community_data.current_round_pot = self.current_round_pot / (self.big_blind * 100)
@@ -280,43 +315,17 @@ class HoldemTable(Env):
         self.community_data.legal_moves = [action in self.legal_moves for action in Action]
         # self.cummunity_data.active_players
 
-        self.player_data = PlayerData()
-        self.player_data.stack = [player.stack / (self.big_blind * 100) for player in self.players]
-
+    def _get_current_player(self):
         if not self.current_player:  # game over
             self.current_player = self.players[self.winner_ix]
-
-        self.player_data.position = self.current_player.seat
-        self.current_player.equity_alive = self.get_equity(set(self.current_player.cards), set(self.table_cards),
-                                                           sum(self.player_cycle.alive), 1000)
-        self.player_data.equity_to_river_alive = self.current_player.equity_alive
-
-        arr1 = np.array(list(flatten(self.player_data.__dict__.values())))
-        arr2 = np.array(list(flatten(self.community_data.__dict__.values())))
-        arr3 = np.array([list(flatten(sd.__dict__.values())) for sd in self.stage_data]).flatten()
-        # arr_legal_only = np.array(self.community_data.legal_moves).flatten()
-
-        self.array_everything = np.concatenate([arr1, arr2, arr3]).flatten()
-
-        self.observation = self.array_everything
-        self._get_legal_moves()
-
-        self.info = {'player_data': self.player_data.__dict__,
-                     'community_data': self.community_data.__dict__,
-                     'stage_data': [stage.__dict__ for stage in self.stage_data],
-                     'legal_moves': self.legal_moves}
-
-        self.observation_space = self.array_everything.shape
-
-        if self.render_switch:
-            self.render()
+        return self.current_player
 
     def _calculate_reward(self, last_action, acting_agent_idx, action_data):
         if self._agent_is_autoplay(acting_agent_idx):
             log.info(f"Skipping calculating action reward for seat {acting_agent_idx} - as it is marked as an autoplay player")
             return
 
-        self._get_environment()
+        self._load_observations()
 
         winning_agent = None
         if self.done:
@@ -338,6 +347,7 @@ class HoldemTable(Env):
 
         assert action in set(self.legal_moves), "Illegal decision"
 
+        current_player = self._get_current_player()
         if action == Action.FOLD:
             self.player_cycle.deactivate_current()
             self.player_cycle.mark_folder()
@@ -345,10 +355,10 @@ class HoldemTable(Env):
         else:
 
             if action == Action.CALL:
-                contribution = min(self.min_call - self.player_pots[self.current_player.seat],
-                                   self.current_player.stack)
-                self.callers.append(self.current_player.seat)
-                self.last_caller = self.current_player.seat
+                contribution = min(self.min_call - self.player_pots[current_player.seat],
+                                   current_player.stack)
+                self.callers.append(current_player.seat)
+                self.last_caller = current_player.seat
 
             # verify the player has enough in his stack
             elif action == Action.CHECK:
@@ -356,30 +366,30 @@ class HoldemTable(Env):
                 self.player_cycle.mark_checker()
 
             elif action == Action.RAISE_TO_3BB:
-                contribution = 3 * self.big_blind - self.player_pots[self.current_player.seat]
-                self.raisers.append(self.current_player.seat)
+                contribution = 3 * self.big_blind - self.player_pots[current_player.seat]
+                self.raisers.append(current_player.seat)
 
             elif action == Action.RAISE_HALF_POT:
                 contribution = (self.community_pot + self.current_round_pot) / 2
-                self.raisers.append(self.current_player.seat)
+                self.raisers.append(current_player.seat)
 
             elif action == Action.RAISE_POT:
                 contribution = (self.community_pot + self.current_round_pot)
-                self.raisers.append(self.current_player.seat)
+                self.raisers.append(current_player.seat)
 
             elif action == Action.RAISE_2POT:
                 contribution = (self.community_pot + self.current_round_pot) * 2
-                self.raisers.append(self.current_player.seat)
+                self.raisers.append(current_player.seat)
 
             elif action == Action.ALL_IN:
-                contribution = self.current_player.stack
-                self.raisers.append(self.current_player.seat)
+                contribution = current_player.stack
+                self.raisers.append(current_player.seat)
 
             elif action == Action.SMALL_BLIND:
-                contribution = np.minimum(self.small_blind, self.current_player.stack)
+                contribution = np.minimum(self.small_blind, current_player.stack)
 
             elif action == Action.BIG_BLIND:
-                contribution = np.minimum(self.big_blind, self.current_player.stack)
+                contribution = np.minimum(self.big_blind, current_player.stack)
                 self.player_cycle.mark_bb()
             else:
                 raise RuntimeError("Illegal action.")
@@ -387,21 +397,21 @@ class HoldemTable(Env):
             if contribution > self.min_call and action not in (Action.SMALL_BLIND, Action.BIG_BLIND):
                 self.player_cycle.mark_raiser()
 
-            self.current_player.stack -= contribution
-            self.player_pots[self.current_player.seat] += contribution
+            current_player.stack -= contribution
+            self.player_pots[current_player.seat] += contribution
             self.current_round_pot += contribution
-            self.last_player_pot = self.player_pots[self.current_player.seat]
+            self.last_player_pot = self.player_pots[current_player.seat]
 
-            if self.current_player.stack == 0 and contribution > 0:
+            if current_player.stack == 0 and contribution > 0:
                 self.player_cycle.mark_out_of_cash_but_contributed()
 
             self.min_call = max(self.min_call, contribution)
 
-            self.current_player.actions.append(action)
-            self.current_player.last_action_in_stage = action.name
-            self.current_player.temp_stack.append(self.current_player.stack)
+            current_player.actions.append(action)
+            current_player.last_action_in_stage = action.name
+            current_player.temp_stack.append(current_player.stack)
 
-            self.player_max_win[self.current_player.seat] += contribution  # side pot
+            self.player_max_win[current_player.seat] += contribution  # side pot
 
             pos = self.player_cycle.idx
             rnd = self.stage.value
@@ -410,14 +420,14 @@ class HoldemTable(Env):
             self.stage_data[rnd].min_call_at_action[pos] = self.min_call / (self.big_blind * 100)
             self.stage_data[rnd].community_pot_at_action[pos] = self.community_pot / (self.big_blind * 100)
             self.stage_data[rnd].contribution[pos] += contribution / (self.big_blind * 100)
-            self.stage_data[rnd].stack_at_action[pos] = self.current_player.stack / (self.big_blind * 100)
+            self.stage_data[rnd].stack_at_action[pos] = current_player.stack / (self.big_blind * 100)
 
         self.player_cycle.update_alive()
 
         log.info(
-            f"Seat {self.current_player.seat} ({self.current_player.name}): {action} - Remaining stack: {self.current_player.stack}, "
+            f"Seat {current_player.seat} ({current_player.name}): {action} - Remaining stack: {current_player.stack}, "
             f"Round pot: {self.current_round_pot}, Community pot: {self.community_pot}, "
-            f"player pot: {self.player_pots[self.current_player.seat]}")
+            f"player pot: {self.player_pots[current_player.seat]}")
 
     def _start_new_hand(self):
         """Deal new cards to players and reset table states."""
@@ -625,26 +635,27 @@ class HoldemTable(Env):
     def _get_legal_moves(self):
         """Determine what moves are allowed in the current state"""
         self.legal_moves = []
-        if self.player_pots[self.current_player.seat] == max(self.player_pots):
+        current_player = self._get_current_player()
+        if self.player_pots[current_player.seat] == max(self.player_pots):
             self.legal_moves.append(Action.CHECK)
         else:
             self.legal_moves.append(Action.CALL)
             self.legal_moves.append(Action.FOLD)
 
         if self.player_cycle.is_raising_allowed():
-            if self.current_player.stack >= (3 * self.big_blind - self.player_pots[self.current_player.seat]) >= self.min_call:
+            if current_player.stack >= (3 * self.big_blind - self.player_pots[current_player.seat]) >= self.min_call:
                 self.legal_moves.append(Action.RAISE_TO_3BB)
 
-            if self.current_player.stack >= ((self.community_pot + self.current_round_pot) / 2) >= self.min_call:
+            if current_player.stack >= ((self.community_pot + self.current_round_pot) / 2) >= self.min_call:
                 self.legal_moves.append(Action.RAISE_HALF_POT)
 
-            if self.current_player.stack >= (self.community_pot + self.current_round_pot) >= self.min_call:
+            if current_player.stack >= (self.community_pot + self.current_round_pot) >= self.min_call:
                 self.legal_moves.append(Action.RAISE_POT)
 
-            if self.current_player.stack >= ((self.community_pot + self.current_round_pot) * 2) >= self.min_call:
+            if current_player.stack >= ((self.community_pot + self.current_round_pot) * 2) >= self.min_call:
                 self.legal_moves.append(Action.RAISE_2POT)
 
-            if self.current_player.stack > 0:
+            if current_player.stack > 0:
                 self.legal_moves.append(Action.ALL_IN)
 
         log.debug(f"Community+current round pot pot: {self.community_pot + self.current_round_pot}")
@@ -908,7 +919,7 @@ class PlayerCycle:
 class PlayerShell:
     """Player shell"""
 
-    def __init__(self, stack_size, name):
+    def __init__(self, stack_size, name, equity_player=True):
         """Initiaization of an agent"""
         self.stack = stack_size
         self.seat = None
@@ -918,3 +929,4 @@ class PlayerShell:
         self.temp_stack = []
         self.name = name
         self.agent_obj = None
+        self.equity_player = equity_player

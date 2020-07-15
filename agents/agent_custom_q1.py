@@ -18,6 +18,7 @@ class Player:
         self.temp_stack = []
         self.name = name
         self.autoplay = True
+        self.equity_player = True
         self.model = None
 
     def initiate_agent(self, nb_actions):
