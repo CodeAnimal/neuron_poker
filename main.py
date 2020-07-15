@@ -31,6 +31,7 @@ import pandas as pd
 from docopt import docopt
 
 from gym_env.env import PlayerShell
+from gym_env.reward.reward_policy import BasicRewardPolicy
 from tools.helper import get_config
 from tools.helper import init_logger
 
@@ -59,7 +60,7 @@ def command_line_parser():
         runner = SelfPlay(render=args['--render'], num_episodes=num_episodes,
                           use_cpp_montecarlo=args['--use_cpp_montecarlo'],
                           funds_plot=args['--funds_plot'],
-                          stack=args['--stack'])
+                          stack=int(args['--stack']))
 
         if args['random']:
             runner.random_agents()
@@ -186,10 +187,9 @@ class SelfPlay:
         from agents.agent_random import Player as RandomPlayer
         env_name = 'neuron_poker-v0'
         env = gym.make(env_name, initial_stacks=self.stack, funds_plot=self.funds_plot, render=self.render,
-                       use_cpp_montecarlo=self.use_cpp_montecarlo)
+                       use_cpp_montecarlo=self.use_cpp_montecarlo, max_raising_rounds=2, max_actions_rounds=None,
+                       reward_policy=BasicRewardPolicy())
 
-        np.random.seed(123)
-        env.seed(123)
         env.add_player(EquityPlayer(name='equity/50/70', min_call_equity=.5, min_bet_equity=.7))
         env.add_player(EquityPlayer(name='equity/20/30', min_call_equity=.2, min_bet_equity=.3))
         env.add_player(RandomPlayer())
@@ -216,8 +216,6 @@ class SelfPlay:
         self.env.add_player(EquityPlayer(name='equity/20/30', min_call_equity=.2, min_bet_equity=.3))
         self.env.add_player(RandomPlayer())
         self.env.add_player(PlayerShell(name='keras-rl', stack_size=self.stack))
-
-        self.env.reset()
 
         dqn = DQNPlayer(load_model=model_name, env=self.env)
         dqn.play(nb_episodes=self.num_episodes, render=self.render)

@@ -9,6 +9,7 @@ from gym import Env
 from gym.spaces import Discrete
 
 from gym_env.rendering import PygletWindow, WHITE, RED, GREEN, BLUE
+from gym_env.reward.models import ActionData
 from tools.hand_evaluator import get_winner
 from tools.helper import flatten
 
@@ -88,12 +89,13 @@ class Stage(Enum):
 class HoldemTable(Env):
     """Pokergame environment"""
 
-    def __init__(self, initial_stacks=100, small_blind=1, big_blind=2, render=False, funds_plot=True,
-                 max_raising_rounds=2, use_cpp_montecarlo=False):
+    def __init__(self, reward_policy, initial_stacks=100, small_blind=1, big_blind=2, render=False, funds_plot=True,
+                 max_raising_rounds=2, max_actions_rounds=2, use_cpp_montecarlo=False):
         """
         The table needs to be initialized once at the beginning
 
         Args:
+            reward_policy (RewardPolicy): the rewards policy
             num_of_players (int): number of players that need to be added
             initial_stacks (real): initial stacks per placyer
             small_blind (real)
@@ -103,6 +105,7 @@ class HoldemTable(Env):
             max_raising_rounds (int): max raises per round per player
 
         """
+        self.reward_policy = reward_policy
         if use_cpp_montecarlo:
             import cppimport
             calculator = cppimport.imp("tools.montecarlo_cpp.pymontecarlo")
@@ -125,9 +128,7 @@ class HoldemTable(Env):
         self.last_player_pot = None
         self.viewer = None
         self.player_max_win = None  # used for side pots
-        self.second_round = False
         self.last_caller = None
-        self.last_raiser = None
         self.raisers = []
         self.callers = []
         self.played_in_round = None
@@ -139,13 +140,15 @@ class HoldemTable(Env):
         self.action = None
         self.winner_ix = None
         self.initial_stacks = initial_stacks
-        self.acting_agent = None
         self.funds_plot = funds_plot
         self.max_round_raising = max_raising_rounds
+        self.max_actions_rounds = max_actions_rounds
+        self.calculating_reward = False
+        self.stop_autoplay = False
 
         # pots
         self.community_pot = 0
-        self.current_round_pot = 9
+        self.current_round_pot = 0
         self.player_pots = None  # individual player pots
 
         self.observation = None
@@ -159,7 +162,7 @@ class HoldemTable(Env):
         self.action_space = Discrete(len(Action) - 2)
         self.first_action_for_hand = None
 
-    def reset(self):
+    def reset(self, dealer_pos=None):
         """Reset after game over."""
         self.observation = None
         self.reward = None
@@ -171,14 +174,13 @@ class HoldemTable(Env):
         for player in self.players:
             player.stack = self.initial_stacks
 
-        self.dealer_pos = 0
-        self.player_cycle = PlayerCycle(self.players, dealer_idx=-1, max_steps_after_raiser=len(self.players) - 1,
-                                        max_steps_after_big_blind=len(self.players))
+        self.dealer_pos = dealer_pos if dealer_pos is not None else np.random.randint(0, len(self.players))
+        self.player_cycle = PlayerCycle(self.players, dealer_idx=self.dealer_pos - 1,
+                                        total_cycles_to_raise=self.max_round_raising, max_cycles_total=self.max_actions_rounds)
         self._start_new_hand()
         self._get_environment()
         # auto play for agents where autoplay is set
-        if self._agent_is_autoplay() and not self.done:
-            self.step('initial_player_autoplay')  # kick off the first action after bb by an autoplay agent
+        self._auto_play()
 
         return self.array_everything
 
@@ -195,44 +197,61 @@ class HoldemTable(Env):
         # and will get a call from to the step function externally (e.g. via
         # keras-rl
         self.reward = 0
-        self.acting_agent = self.player_cycle.idx
         if self._agent_is_autoplay():
-            while self._agent_is_autoplay() and not self.done:
-                log.debug("Autoplay agent. Call action method of agent.")
-                self._get_environment()
-                # call agent's action method
-                action = self.current_player.agent_obj.action(self.legal_moves, self.observation, self.info)
-                if Action(action) not in self.legal_moves:
-                    self._illegal_move(action)
-                else:
-                    self._execute_step(Action(action))
-                    if self.first_action_for_hand[self.acting_agent] or self.done:
-                        self.first_action_for_hand[self.acting_agent] = False
-                        self._calculate_reward(action)
-
+            self._auto_play()
         else:  # action received from player shell (e.g. keras rl, not autoplay)
             self._get_environment()  # get legal moves
-            if Action(action) not in self.legal_moves:
-                self._illegal_move(action)
-            else:
-                self._execute_step(Action(action))
-                if self.first_action_for_hand[self.acting_agent] or self.done:
-                    self.first_action_for_hand[self.acting_agent] = False
-                    self._calculate_reward(action)
+            self._execute_step(Action(action), self.player_cycle.idx)
 
-            log.info(f"Previous action reward for seat {self.acting_agent}: {self.reward}")
         return self.array_everything, self.reward, self.done, self.info
 
-    def _execute_step(self, action):
+    def _execute_step(self, action, acting_agent_idx):
+        if Action(action) not in self.legal_moves:
+            self._illegal_move(action)
+            return
+
         self._process_decision(action)
+        action_data = self._get_action_data()
 
         self._next_player()
 
         if self.stage in [Stage.END_HIDDEN, Stage.SHOWDOWN]:
             self._end_hand()
             self._start_new_hand()
+            if self.calculating_reward:
+                self.stop_autoplay = True
 
         self._get_environment()
+
+        if self.first_action_for_hand[acting_agent_idx] or self.done:
+            self.first_action_for_hand[acting_agent_idx] = False
+
+        if not self.calculating_reward and not self._agent_is_autoplay(acting_agent_idx):
+            if self.stage not in [Stage.END_HIDDEN, Stage.SHOWDOWN]:
+                self.calculating_reward = True
+                self._auto_play()
+                self.calculating_reward = False
+            self._calculate_reward(last_action=action,
+                                   acting_agent_idx=acting_agent_idx,
+                                   action_data=action_data)
+
+    def _get_action_data(self):
+        return ActionData(
+            player_stack=self.current_player.stack,
+            player_pot=self.player_pots[self.current_player.seat],
+            round_pot=self.current_round_pot,
+            community_pot=self.community_pot
+        )
+
+    def _auto_play(self):
+        while not self.stop_autoplay and not self.done and self._agent_is_autoplay():
+            log.debug("Autoplay agent. Call action method of agent.")
+            self._get_environment()
+            # call agent's action method
+            action = self.current_player.agent_obj.action(self.legal_moves, self.observation, self.info)
+            self._execute_step(Action(action), self.player_cycle.idx)
+
+        self.stop_autoplay = False
 
     def _illegal_move(self, action):
         log.warning(f"{action} is an Illegal move, try again. Currently allowed: {self.legal_moves}")
@@ -292,35 +311,32 @@ class HoldemTable(Env):
         if self.render_switch:
             self.render()
 
-    def _calculate_reward(self, last_action):
-        """
-        Preliminiary implementation of reward function
+    def _calculate_reward(self, last_action, acting_agent_idx, action_data):
+        if self._agent_is_autoplay(acting_agent_idx):
+            log.info(f"Skipping calculating action reward for seat {acting_agent_idx} - as it is marked as an autoplay player")
+            return
 
-        - Currently missing potential additional winnings from future contributions
-        """
-        # if last_action == Action.FOLD:
-        #     self.reward = -(
-        #             self.community_pot + self.current_round_pot)
-        # else:
-        #     self.reward = self.player_data.equity_to_river_alive * (self.community_pot + self.current_round_pot) - \
-        #                   (1 - self.player_data.equity_to_river_alive) * self.player_pots[self.current_player.seat]
-        _ = last_action
+        self._get_environment()
+
+        winning_agent = None
         if self.done:
-            won = 1 if not self._agent_is_autoplay(idx=self.winner_ix) else -1
-            self.reward = self.initial_stacks * len(self.players) * won
-            log.debug(f"Keras-rl agent has reward {self.reward}")
+            winning_agent = self.winner_ix
 
-        elif len(self.funds_history) > 1:
-            self.reward = self.funds_history.iloc[-1, self.acting_agent] - self.funds_history.iloc[
-                -2, self.acting_agent]
+        self.reward = self.reward_policy.calculate_reward(
+            env=self,
+            last_action=Action(last_action),
+            winning_agent=winning_agent,
+            acting_agent_idx=acting_agent_idx,
+            action_data=action_data
+        )
 
-        else:
-            pass
+        if not self._agent_is_autoplay(acting_agent_idx):
+            log.info(f"Previous action reward for seat {acting_agent_idx}: {self.reward}")
 
     def _process_decision(self, action):  # pylint: disable=too-many-statements
         """Process the decisions that have been made by an agent."""
-        if action not in [Action.SMALL_BLIND, Action.BIG_BLIND]:
-            assert action in set(self.legal_moves), "Illegal decision"
+
+        assert action in set(self.legal_moves), "Illegal decision"
 
         if action == Action.FOLD:
             self.player_cycle.deactivate_current()
@@ -368,7 +384,7 @@ class HoldemTable(Env):
             else:
                 raise RuntimeError("Illegal action.")
 
-            if contribution > self.min_call:
+            if contribution > self.min_call and action not in (Action.SMALL_BLIND, Action.BIG_BLIND):
                 self.player_cycle.mark_raiser()
 
             self.current_player.stack -= contribution
@@ -388,7 +404,7 @@ class HoldemTable(Env):
             self.player_max_win[self.current_player.seat] += contribution  # side pot
 
             pos = self.player_cycle.idx
-            rnd = self.stage.value + self.second_round
+            rnd = self.stage.value
             self.stage_data[rnd].calls[pos] = action == Action.CALL
             self.stage_data[rnd].raises[pos] = action in [Action.RAISE_2POT, Action.RAISE_HALF_POT, Action.RAISE_POT]
             self.stage_data[rnd].min_call_at_action[pos] = self.min_call / (self.big_blind * 100)
@@ -481,7 +497,6 @@ class HoldemTable(Env):
     def _initiate_round(self):
         """A new round (flop, turn, river) is initiated"""
         self.last_caller = None
-        self.last_raiser = None
         self.raisers = []
         self.callers = []
         self.min_call = 0
@@ -492,18 +507,16 @@ class HoldemTable(Env):
         if self.stage == Stage.PREFLOP:
             log.info("")
             log.info("===Round: Stage: PREFLOP")
-            # max steps total will be adjusted again at bb
-            self.player_cycle.max_steps_total = len(self.players) * self.max_round_raising + 2
 
             self._next_player()
+            self.legal_moves = [Action.SMALL_BLIND]
             self._process_decision(Action.SMALL_BLIND)
             self._next_player()
+            self.legal_moves = [Action.BIG_BLIND]
             self._process_decision(Action.BIG_BLIND)
             self._next_player()
 
         elif self.stage in [Stage.FLOP, Stage.TURN, Stage.RIVER]:
-            self.player_cycle.max_steps_total = len(self.players) * self.max_round_raising
-
             self._next_player()
 
         elif self.stage == Stage.SHOWDOWN:
@@ -733,44 +746,48 @@ class HoldemTable(Env):
 class PlayerCycle:
     """Handle the circularity of the Table."""
 
-    def __init__(self, lst, start_idx=0, dealer_idx=0, max_steps_total=None,
-                 last_raiser_step=None, max_steps_after_raiser=None, max_steps_after_big_blind=None):
+    def __init__(self, lst, start_idx=0, dealer_idx=0, max_steps_after_big_blind=None, total_cycles_to_raise=None,
+                 max_cycles_total=None):
         """Cycle over a list"""
         self.lst = lst
         self.start_idx = start_idx
         self.size = len(lst)
-        self.max_steps_total = max_steps_total
-        self.last_raiser_step = last_raiser_step
-        self.max_steps_after_raiser = max_steps_after_raiser
+        self.max_cycles_total = max_cycles_total
+        self.last_raiser_step = None
+        self.max_steps_after_last_raiser = self.size
         self.max_steps_after_big_blind = max_steps_after_big_blind
-        self.last_raiser = None
+        self.max_steps_total = None
         self.step_counter = 0
         self.steps_for_blind_betting = 2
-        self.second_round = False
+        self.total_steps_to_raise = total_cycles_to_raise * self.size + self.steps_for_blind_betting if total_cycles_to_raise else None
         self.idx = 0
         self.dealer_idx = dealer_idx
         self.can_still_make_moves_in_this_hand = []  # if the player can still play in this round
-        self.alive = [True] * len(self.lst)  # if the player can still play in the following rounds
-        self.out_of_cash_but_contributed = [False] * len(self.lst)
+        self.alive = [True] * self.size  # if the player can still play in the following rounds
+        self.out_of_cash_but_contributed = [False] * self.size
         self.new_hand_reset()
         self.checkers = 0
         self.folder = None
+        self.max_steps_when_no_raiser = self.size
 
     def new_hand_reset(self):
         """Reset state if a new hand is dealt"""
         self.idx = self.start_idx
-        self.can_still_make_moves_in_this_hand = [True] * len(self.lst)
-        self.out_of_cash_but_contributed = [False] * len(self.lst)
-        self.folder = [False] * len(self.lst)
+        self.can_still_make_moves_in_this_hand = [True] * self.size
+        self.out_of_cash_but_contributed = [False] * self.size
+        self.folder = [False] * self.size
         self.step_counter = 0
+        self.last_raiser_step = None
+        self.max_steps_when_no_raiser = self.size
 
     def new_round_reset(self):
         """Reset the state for the next stage: flop, turn or river"""
         self.step_counter = 0
-        self.second_round = False
         self.idx = self.dealer_idx
-        self.last_raiser_step = len(self.lst)
+        self.last_raiser_step = None
         self.checkers = 0
+        self.max_steps_when_no_raiser = self.size
+        self.max_steps_total = self.size * self.max_cycles_total if self.max_cycles_total else None
 
     def next_player(self, step=1):
         """Switch to the next player in the round."""
@@ -778,38 +795,18 @@ class PlayerCycle:
             log.debug("Only one player remaining")
             return False  # only one player remains
 
-        self.idx += step
-        self.step_counter += step
-        self.idx %= len(self.lst)
-        if self.step_counter > len(self.lst):
-            self.second_round = True
-        if self.max_steps_total and (self.step_counter >= self.max_steps_total):
-            log.debug("Max steps total has been reached")
-            return False
-
-        if self.last_raiser:
-            raiser_reference = self.last_raiser
-            if self.max_steps_after_raiser and (self.step_counter > self.max_steps_after_raiser + raiser_reference):
-                log.debug("max steps after raiser has been reached")
-                return False
-        elif self.max_steps_after_raiser and \
-                (self.step_counter > self.max_steps_after_big_blind + self.steps_for_blind_betting):
-            log.debug("max steps after raiser has been reached")
-            return False
-
-        if self.checkers == sum(self.alive):
-            log.debug("All players checked")
+        step_check_error = self._increment_idx(step)
+        if step_check_error:
+            log.debug(step_check_error)
             return False
 
         while True:
             if self.can_still_make_moves_in_this_hand[self.idx]:
                 break
 
-            self.idx += 1
-            self.step_counter += 1
-            self.idx %= len(self.lst)
-            if self.max_steps_total and self.step_counter >= self.max_steps_total:
-                log.debug("Max steps total has been reached after jumping some folders")
+            step_check_error = self._increment_idx(1)
+            if step_check_error:
+                log.debug(f"{step_check_error} after jumping some out-of-action players")
                 return False
 
         self.update_alive()
@@ -818,14 +815,14 @@ class PlayerCycle:
     def next_dealer(self):
         """Move the dealer to the next player that's still in the round."""
         self.dealer_idx += 1
-        self.dealer_idx %= len(self.lst)
+        self.dealer_idx %= self.size
 
         while True:
             if self.can_still_make_moves_in_this_hand[self.dealer_idx]:
                 break
 
             self.dealer_idx += 1
-            self.dealer_idx %= len(self.lst)
+            self.dealer_idx %= self.size
 
         return self.lst[self.dealer_idx]
 
@@ -849,8 +846,7 @@ class PlayerCycle:
 
     def mark_raiser(self):
         """Mark a raise for the current player."""
-        if self.step_counter > 2:
-            self.last_raiser = self.step_counter
+        self.last_raiser_step = self.step_counter
 
     def mark_checker(self):
         """Counter the number of checks in the round"""
@@ -863,12 +859,14 @@ class PlayerCycle:
 
     def mark_bb(self):
         """Ensure bb can raise"""
-        self.last_raiser_step = self.step_counter + len(self.lst)
-        self.max_steps_total = self.step_counter + len(self.lst) * 2
+        self.last_raiser_step = self.step_counter
+        self.max_steps_when_no_raiser = self.size + 2  # plus 2 so that the BB has chance to raise
+        self.max_steps_total = self.max_steps_total + 2 if self.max_steps_total else None
+        # self.max_steps_total = self.step_counter + self.max_steps_total if self.max_steps_total else None
 
     def is_raising_allowed(self):
         """Check if raising is still allowed at this position"""
-        return self.step_counter <= self.last_raiser_step
+        return self.step_counter <= self.total_steps_to_raise if self.total_steps_to_raise else True
 
     def update_alive(self):
         """Update the alive property"""
@@ -881,6 +879,30 @@ class PlayerCycle:
                                                          np.array(self.out_of_cash_but_contributed)),
                                            np.logical_not(np.array(self.folder)))
         return potential_winners
+
+    def _increment_idx(self, step):
+        self.idx += step
+        self.step_counter += step
+        self.idx %= self.size
+
+        return self._check_steps_error()
+
+    def _check_steps_error(self):
+        if self.max_steps_total and (self.step_counter > self.max_steps_total):
+            return "max steps total has been reached"
+
+        if self.last_raiser_step \
+                and (self.step_counter > self.max_steps_after_last_raiser + self.last_raiser_step):
+            return "max steps after last raiser has been reached"
+        elif not self.last_raiser_step \
+                and self.step_counter > self.max_steps_when_no_raiser:
+            return "max steps when no raiser has been reached"
+
+        if self.max_steps_after_big_blind and \
+                (self.step_counter > self.max_steps_after_big_blind + self.steps_for_blind_betting):
+            return "max steps after big blind has been reached"
+
+        return None
 
 
 class PlayerShell:

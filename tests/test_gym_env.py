@@ -2,25 +2,26 @@
 import pytest
 
 from gym_env.env import HoldemTable, Action, Stage, PlayerCycle
+from gym_env.reward.reward_policy import BasicRewardPolicy
 
 
-def _create_env(n_players):
+def _create_env(n_players, max_raising_rounds=None, max_actions_rounds=None):
     """Create an environment"""
-    env = HoldemTable()
+    env = HoldemTable(reward_policy=BasicRewardPolicy(), max_raising_rounds=max_raising_rounds, max_actions_rounds=max_actions_rounds)
     for _ in range(n_players):
         player = PlayerForTest()
         env.add_player(player)
-    env.reset()
+    env.reset(0)
     return env
 
 
 def test_basic_actions_with_6_player():
     """Test basic actions with 6 players."""
-    env = _create_env(6)
+    env = _create_env(6, max_actions_rounds=1)
     assert len(env.players[0].cards) == 2
     assert env.current_player.seat == 3  # start with utg
 
-    env.step(Action.CALL)  # 3
+    env.step(Action.CALL)  # utg
     env.step(Action.FOLD)  # 4
     env.step(Action.FOLD)  # 5
     env.step(Action.FOLD)  # 0 dealer
@@ -34,7 +35,6 @@ def test_basic_actions_with_6_player():
     assert env.players[2].stack == 98
     assert env.stage == Stage.PREFLOP
     env.step(Action.RAISE_POT)  # big blind raises
-    assert env.player_cycle.second_round
     env.step(Action.FOLD)  # utg
     env.step(Action.CALL)  # 4 only remaining player calls
     assert env.stage == Stage.FLOP
@@ -66,7 +66,7 @@ def test_one_player_raise3bb_one_call_this_call_is_last_action_in_round():
     """1. Test verifies solving of bugs see posts of dsfdsfgdsa from 11.06.2020 in
     https://github.com/dickreuter/neuron_poker/issues/25.
     Bug description: One player Raise_3BB and other call normally now is the round over, but with bug the first player can check again."""
-    env = _create_env(2)
+    env = _create_env(2, max_actions_rounds=1)
 
     env.step(Action.SMALL_BLIND)
     env.step(Action.BIG_BLIND)
@@ -151,9 +151,9 @@ def test_heads_up_after_flop():
     assert env.stage == Stage.PREFLOP
 
 
-def test_base_actions_6_players_check_legal_moves_and_stages():
+def test_base_actions_6_players_check_legal_moves_and_stages_with_1_round_of_raising():
     """Test basic actions with 6 players."""
-    env = _create_env(6)
+    env = _create_env(6, 1)
     env.step(Action.CALL)  # seat 3 utg
     env.step(Action.CALL)  # seat 4
     env.step(Action.CALL)  # seat 5
@@ -177,6 +177,26 @@ def test_base_actions_6_players_check_legal_moves_and_stages():
     # env.step(Action.RAISE_HALF_POT) # seat 2 big blind
 
 
+def test_base_actions_6_players_check_legal_moves_and_stages_with_2_rounds_of_raising():
+    """Test basic actions with 6 players."""
+    env = _create_env(6, 2)
+    env.step(Action.CALL)  # seat 3 utg
+    env.step(Action.CALL)  # seat 4
+    env.step(Action.CALL)  # seat 5
+    env.step(Action.CALL)  # seat 0 dealer
+    assert env.stage == Stage.PREFLOP
+    env.step(Action.RAISE_HALF_POT)  # seat 1 small blind
+    assert len(env.legal_moves) > 2
+    assert env.stage == Stage.PREFLOP
+    env.step(Action.RAISE_HALF_POT)  # seat 2 big blind
+    assert env.stage == Stage.PREFLOP
+    assert len(env.legal_moves) > 2
+    env.step(Action.CALL)  # seat 3 utg in second round
+    env.step(Action.CALL)  # seat 4
+    env.step(Action.CALL)  # seat 5
+    env.step(Action.CALL)  # seat 0 dealer
+
+
 def test_cycle_mechanism1():
     """Test cycle"""
     lst = ['dealer', 'sb', 'bb', 'utg', 'utg1', 'utg2']
@@ -185,29 +205,61 @@ def test_cycle_mechanism1():
     assert current == 'sb'
     current = cycle.next_player(step=2)
     assert current == 'utg'
+    cycle.mark_raiser()
     cycle.deactivate_current()
-    current = cycle.next_player(step=6)
+    current = cycle.next_player(step=3)
+    cycle.mark_raiser()
+    current = cycle.next_player(step=3)
     assert current == 'utg1'
+    cycle.mark_raiser()
     current = cycle.next_player(step=1)
     assert current == 'utg2'
     current = cycle.next_player()
     assert current == 'dealer'
     cycle.deactivate_player(0)
     cycle.deactivate_player(1)
+    cycle.mark_raiser()
     cycle.deactivate_player(2)
     current = cycle.next_player(step=2)
     assert current == 'utg1'
 
 
-def test_cycle_mechanism2():
+def test_cycle_mechanism_max_cycles_total_1():
     """Test cycle"""
     lst = ['dealer', 'sb', 'bb', 'utg']
-    cycle = PlayerCycle(lst, start_idx=2, max_steps_total=5)
-    current = cycle.next_player()
+    cycle = PlayerCycle(lst, start_idx=2, max_cycles_total=1)
+    current = cycle.next_player()  # first player counted
     assert current == 'utg'
     cycle.next_player()
+    current = cycle.next_player(step=3)
+    assert not current
+
+
+def test_cycle_mechanism_max_cycles_total_2():
+    """Test cycle"""
+    lst = ['dealer', 'sb', 'bb', 'utg']
+    cycle = PlayerCycle(lst, start_idx=2, max_cycles_total=2)
+    current = cycle.next_player()  # first player counted
+    assert current == 'utg'
     cycle.next_player()
-    current = cycle.next_player(step=2)
+    current = cycle.next_player(step=3)
+    assert not current
+
+
+def test_cycle_mechanism_max_cycles_total_1_and_bb():
+    """Test cycle"""
+    lst = ['dealer', 'sb', 'bb', 'utg']
+    cycle = PlayerCycle(lst, max_cycles_total=2)
+    current = cycle.next_player()  # first player counted
+    assert current == 'sb'
+    current = cycle.next_player()
+    assert current == 'bb'
+    cycle.mark_bb()
+    current = cycle.next_player()
+    assert current == 'utg'
+    current = cycle.next_player(step=3)
+    assert current == 'bb'
+    current = cycle.next_player()
     assert not current
 
 
