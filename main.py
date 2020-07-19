@@ -199,8 +199,6 @@ class SelfPlay:
         env.add_player(RandomPlayer())
         env.add_player(PlayerShell(name='keras-rl', stack_size=stack))  # shell is used for callback to keras rl
 
-        env.reset()
-
         dqn = DQNPlayer()
         dqn.initiate_agent(env)
         dqn.train(env_name=model_name)
@@ -219,8 +217,6 @@ class SelfPlay:
         self.env.add_player(EquityPlayer(name='equity/20/30', min_call_equity=.2, min_bet_equity=.3))
         self.env.add_player(RandomPlayer())
         self.env.add_player(PlayerShell(name='keras-rl', stack_size=stack))
-
-        self.env.reset()
 
         dqn = DQNPlayer(load_model=model_name, env=self.env)
         dqn.play(nb_episodes=self.num_episodes, render=self.render)
