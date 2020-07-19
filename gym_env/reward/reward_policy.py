@@ -50,5 +50,5 @@ class BasicRewardPolicy(RewardPolicy):
             reward = env.funds_history.iloc[-1, acting_agent_idx] - env.funds_history.iloc[
                 -2, acting_agent_idx]
 
-        log.debug(f"Keras-rl agent has reward {reward}")
+        log.debug(f"Calculated reward: {reward}")
         return reward

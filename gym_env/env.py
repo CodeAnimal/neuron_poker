@@ -200,6 +200,11 @@ class HoldemTable(Env):
             self._get_legal_moves()
             self._execute_step(Action(action), self.player_cycle.idx)
 
+        log.debug("==step complete==")
+        log.debug(self.info)
+        log.debug(f"reward: {self.reward}")
+        log.debug(f"done: {self.done}")
+        log.debug("=================")
         return self.observation, self.reward, self.done, self.info
 
     def _execute_step(self, action, acting_agent_idx):
@@ -243,7 +248,7 @@ class HoldemTable(Env):
 
     def _auto_play(self):
         while not self.stop_autoplay and not self.done and self._agent_is_autoplay():
-            log.debug("Autoplay agent. Call action method of agent.")
+            log.debug("Autoplay agent. Calling action method of agent.")
             self._load_observations()
             # call agent's action method
             action = self.current_player.agent_obj.action(self.legal_moves, self.observation, self.info)
@@ -320,7 +325,7 @@ class HoldemTable(Env):
 
     def _calculate_reward(self, last_action, acting_agent_idx, action_data):
         if self._agent_is_autoplay(acting_agent_idx):
-            log.info(f"Skipping calculating action reward for seat {acting_agent_idx} - as it is marked as an autoplay player")
+            log.debug(f"Skipping calculating action reward for seat {acting_agent_idx} - as it is marked as an autoplay player")
             return
 
         self._load_observations()
@@ -338,7 +343,7 @@ class HoldemTable(Env):
         )
 
         if not self._agent_is_autoplay(acting_agent_idx):
-            log.info(f"Previous action reward for seat {acting_agent_idx}: {self.reward}")
+            log.info(f"Action reward for seat {acting_agent_idx}: {self.reward}")
 
     def _process_decision(self, action):  # pylint: disable=too-many-statements
         """Process the decisions that have been made by an agent."""

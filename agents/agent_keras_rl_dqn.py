@@ -105,14 +105,19 @@ class Player:
 
         self.dqn.fit(self.env, nb_max_start_steps=nb_max_start_steps, nb_steps=steps, visualize=False, verbose=2,
                      start_step_policy=self.start_step_policy, callbacks=[tensorboard])
+        log.info("###################################################################################################")
+        log.info("###################################################################################################")
+        log.info(f"Training finished after {steps} steps")
 
         # Save the architecture
         dqn_json = self.model.to_json()
         with open("dqn_{}_json.json".format(env_name), "w") as json_file:
             json.dump(dqn_json, json_file)
+        log.info(f"Model saved to 'dqn_{env_name}_json.json'")
 
         # After training is done, we save the final weights.
         self.dqn.save_weights('dqn_{}_weights.h5'.format(env_name), overwrite=True)
+        log.info(f"Weights saved to 'dqn_{env_name}_weights.h5'")
 
         mem = (self.memory,
                self.memory.actions,
@@ -120,7 +125,9 @@ class Player:
                self.memory.terminals,
                self.memory.observations)
         pickle.dump(mem, open("dqn_{}_memory.pkl".format(env_name), "wb"), protocol=-1)
+        log.info(f"Sequential memory saved to 'dqn_{env_name}_memory.pkl'")
 
+        log.info(f"Running test for 5 episodes'")
         # Finally, evaluate our algorithm for 5 episodes.
         self.dqn.test(self.env, nb_episodes=5, visualize=False)
 
@@ -202,7 +209,9 @@ class TrumpPolicy(BoltzmannQPolicy):
         exp_values = np.exp(np.clip(q_values / self.tau, self.clip[0], self.clip[1]))
         probs = exp_values / np.sum(exp_values)
         action = np.random.choice(range(nb_actions), p=probs)
-        log.info(f"Chosen action by keras-rl {action} - probabilities: {probs}")
+
+        log.debug(f"Chosen action by keras-rl {Action(action)}")
+        log.debug(f"Probabilities: { {Action(i):probs[i] for i in range(len(probs))} }")
         return action
 
 
