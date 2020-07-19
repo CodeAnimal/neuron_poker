@@ -31,7 +31,7 @@ class BasicRewardPolicy(RewardPolicy):
 
     - Currently missing potential additional winnings from future contributions"""
 
-    def calculate_reward(self, env, last_action, winning_agent, acting_agent_idx, action_data):
+    def calculate_reward(self, env, last_action, winning_agent_idx, acting_agent_idx, pre_action_data, post_action_data, round_ended):
         # if last_action == Action.FOLD:
         #     self.reward = -(
         #             self.community_pot + self.current_round_pot)
@@ -42,7 +42,7 @@ class BasicRewardPolicy(RewardPolicy):
 
         _ = last_action
         if env.done:
-            won = 1 if winning_agent == acting_agent_idx else -1
+            won = 1 if winning_agent_idx == acting_agent_idx else -1
 
             reward = env.initial_stacks * len(env.players) * won
 

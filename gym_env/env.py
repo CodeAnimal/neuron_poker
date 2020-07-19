@@ -212,8 +212,10 @@ class HoldemTable(Env):
             self._illegal_move(action)
             return
 
+        round_ended = False
+        pre_action_data = self._get_action_data()
         self._process_decision(action)
-        action_data = self._get_action_data()
+        post_action_data = self._get_action_data()
 
         self._next_player()
 
@@ -221,6 +223,7 @@ class HoldemTable(Env):
             self._end_hand()
             self._start_new_hand()
             if self.calculating_reward:
+                round_ended = True
                 self.stop_autoplay = True
 
         if self.first_action_for_hand[acting_agent_idx] or self.done:
@@ -235,7 +238,9 @@ class HoldemTable(Env):
                 self.calculating_reward = False
             self._calculate_reward(last_action=action,
                                    acting_agent_idx=acting_agent_idx,
-                                   action_data=action_data)
+                                   round_ended=round_ended,
+                                   pre_action_data=pre_action_data,
+                                   post_action_data=post_action_data)
 
     def _get_action_data(self):
         player = self._get_current_player()
@@ -323,23 +328,25 @@ class HoldemTable(Env):
             self.current_player = self.players[self.winner_ix]
         return self.current_player
 
-    def _calculate_reward(self, last_action, acting_agent_idx, action_data):
+    def _calculate_reward(self, last_action, acting_agent_idx, round_ended, pre_action_data, post_action_data):
         if self._agent_is_autoplay(acting_agent_idx):
             log.debug(f"Skipping calculating action reward for seat {acting_agent_idx} - as it is marked as an autoplay player")
             return
 
         self._load_observations()
 
-        winning_agent = None
+        winning_agent_idx = None
         if self.done:
-            winning_agent = self.winner_ix
+            winning_agent_idx = self.winner_ix
 
         self.reward = self.reward_policy.calculate_reward(
             env=self,
             last_action=Action(last_action),
-            winning_agent=winning_agent,
+            winning_agent_idx=winning_agent_idx,
             acting_agent_idx=acting_agent_idx,
-            action_data=action_data
+            round_ended=round_ended,
+            post_action_data=post_action_data,
+            pre_action_data=pre_action_data
         )
 
         if not self._agent_is_autoplay(acting_agent_idx):
