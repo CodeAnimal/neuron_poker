@@ -197,8 +197,6 @@ class SelfPlay:
         env.add_player(RandomPlayer())
         env.add_player(PlayerShell(name='keras-rl', stack_size=self.stack))  # shell is used for callback to keras rl
 
-        env.reset()
-
         dqn = DQNPlayer()
         dqn.initiate_agent(env)
         dqn.train(env_name=model_name, steps=1e4)

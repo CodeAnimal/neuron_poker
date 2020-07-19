@@ -62,6 +62,7 @@ class Player:
         tf.compat.v1.disable_eager_execution()
         disable_eager_execution()
 
+        env.reset()
         self.env = env
 
         nb_actions = self.env.action_space.n
@@ -84,7 +85,7 @@ class Player:
 
         self.dqn = DQNAgent(model=self.model, nb_actions=nb_actions, memory=self.memory, nb_steps_warmup=nb_steps_warmup,
                             target_model_update=1e-2, policy=policy,
-                            processor=CustomProcessor(),
+                            processor=CustomTrainProcessor(),
                             batch_size=batch_size, train_interval=train_interval, enable_double_dqn=enable_double_dqn)
         self.dqn.compile(Adam(lr=1e-3), metrics=['mae'])
 
@@ -143,7 +144,7 @@ class Player:
         self.memory = SequentialMemory(limit=memory_limit, window_length=window_length)
         policy = TrumpPolicy()
 
-        class CustomProcessor(Processor):  # pylint: disable=redefined-outer-name
+        class CustomPlayProcessor(Processor):  # pylint: disable=redefined-outer-name
             """The agent and the environment"""
 
             def process_state_batch(self, batch):
@@ -163,7 +164,7 @@ class Player:
 
         self.dqn = DQNAgent(model=self.model, nb_actions=nb_actions, memory=self.memory, nb_steps_warmup=nb_steps_warmup,
                             target_model_update=1e-2, policy=policy,
-                            processor=CustomProcessor(),
+                            processor=CustomPlayProcessor(),
                             batch_size=batch_size, train_interval=train_interval, enable_double_dqn=enable_double_dqn)
         self.dqn.compile(Adam(lr=1e-3), metrics=['mae'])  # pylint: disable=no-member
 
@@ -205,7 +206,7 @@ class TrumpPolicy(BoltzmannQPolicy):
         return action
 
 
-class CustomProcessor(Processor):
+class CustomTrainProcessor(Processor):
     """The agent and the environment"""
 
     def __init__(self):
@@ -222,19 +223,3 @@ class CustomProcessor(Processor):
         else:
             self.legal_moves_limit = None
         return {'x': 1}  # on arrays allowed it seems
-
-    def process_action(self, action):
-        """Find nearest legal action"""
-        if 'legal_moves_limit' in self.__dict__ and self.legal_moves_limit is not None:
-            self.legal_moves_limit = [move.value for move in self.legal_moves_limit]
-            if action not in self.legal_moves_limit:
-                for i in range(5):
-                    action += i
-                    if action in self.legal_moves_limit:
-                        break
-                    action -= i * 2
-                    if action in self.legal_moves_limit:
-                        break
-                    action += i
-
-        return action
