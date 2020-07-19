@@ -17,9 +17,12 @@ class RewardPolicy:
 
     # Arguments
         env (gym_env.env.HoldemTable): Poker environment
-        winning_agent (int): The index of the winning agent. Can be None (not done so unknown)
-        acting_agent_idx (int): The index of the originally acting agent.
         last_action (gym_env.env.Action): The last action taken by the acting agent
+        winning_agent_idx (int): The index of the winning agent. Can be None (not done so unknown)
+        acting_agent_idx (int): The index of the originally acting agent.
+        pre_action_data (gym_env.reward.models.ActionData): A set of environment data at the point before the chosen action was executed.
+        post_action_data (gym_env.reward.models.ActionData): A set of environment data at the point just after the chosen action was executed.
+        round_ended (bool): True if the round ended after the action was executed.
     """
 
     def calculate_reward(self, **kwargs):
