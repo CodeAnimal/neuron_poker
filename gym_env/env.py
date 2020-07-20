@@ -157,9 +157,12 @@ class HoldemTable(Env):
         self.done = False
         self.funds_history = None
         self.legal_moves = None
-        self.illegal_move_reward = -1e5
+        self.illegal_move_reward = -1e2
         self.action_space = Discrete(len(Action) - 2)
         self.first_action_for_hand = None
+        self.round_ended = False
+        self.acting_agent_idx = None
+        self.acting_agent_hypo_winner = False
 
     def reset(self, dealer_pos=None):
         """Reset after game over."""
@@ -177,6 +180,7 @@ class HoldemTable(Env):
         self.player_cycle = PlayerCycle(self.players, dealer_idx=self.dealer_pos - 1,
                                         total_cycles_to_raise=self.max_round_raising, max_cycles_total=self.max_actions_rounds)
         self._start_new_hand()
+        self._save_funds_history()
 
         self._load_observations()
         return self.observation
@@ -198,6 +202,7 @@ class HoldemTable(Env):
             self._auto_play()
         else:  # action received from player shell (e.g. keras rl, not autoplay)
             self._get_legal_moves()
+            self.acting_agent_idx = self.player_cycle.idx
             self._execute_step(Action(action), self.player_cycle.idx)
 
         log.debug("==step complete==")
@@ -207,12 +212,11 @@ class HoldemTable(Env):
         log.debug("=================")
         return self.observation, self.reward, self.done, self.info
 
-    def _execute_step(self, action, acting_agent_idx):
+    def _execute_step(self, action, player_idx):
         if Action(action) not in self.legal_moves:
             self._illegal_move(action)
             return
 
-        round_ended = False
         pre_action_data = self._get_action_data()
         self._process_decision(action)
         post_action_data = self._get_action_data()
@@ -221,26 +225,31 @@ class HoldemTable(Env):
 
         if self.stage in [Stage.END_HIDDEN, Stage.SHOWDOWN]:
             self._end_hand()
-            self._start_new_hand()
-            if self.calculating_reward:
-                round_ended = True
-                self.stop_autoplay = True
+            self.round_ended = True
+            self.stop_autoplay = True
 
-        if self.first_action_for_hand[acting_agent_idx] or self.done:
-            self.first_action_for_hand[acting_agent_idx] = False
+        if self.first_action_for_hand[player_idx] or self.done:
+            self.first_action_for_hand[player_idx] = False
 
         self._load_observations()
 
-        if not self.calculating_reward and not self._agent_is_autoplay(acting_agent_idx):
+        if not self.calculating_reward and not self._agent_is_autoplay(player_idx):
             if self.stage not in [Stage.END_HIDDEN, Stage.SHOWDOWN]:
+                self.round_ended = False
                 self.calculating_reward = True
                 self._auto_play()
                 self.calculating_reward = False
             self._calculate_reward(last_action=action,
-                                   acting_agent_idx=acting_agent_idx,
-                                   round_ended=round_ended,
+                                   acting_agent_idx=self.acting_agent_idx,
+                                   acting_agent_hypo_winner=self.acting_agent_hypo_winner,
+                                   round_ended=self.round_ended,
                                    pre_action_data=pre_action_data,
                                    post_action_data=post_action_data)
+
+        if self.stage in [Stage.END_HIDDEN, Stage.SHOWDOWN] \
+                and (not self.calculating_reward or not self._agent_is_autoplay(player_idx)):
+            self._start_new_hand()
+            self.round_ended = False
 
     def _get_action_data(self):
         player = self._get_current_player()
@@ -252,7 +261,7 @@ class HoldemTable(Env):
         )
 
     def _auto_play(self):
-        while not self.stop_autoplay and not self.done and self._agent_is_autoplay():
+        while not self.stop_autoplay and not self.done and self.current_player and self._agent_is_autoplay():
             log.debug("Autoplay agent. Calling action method of agent.")
             self._load_observations()
             # call agent's action method
@@ -328,22 +337,21 @@ class HoldemTable(Env):
             self.current_player = self.players[self.winner_ix]
         return self.current_player
 
-    def _calculate_reward(self, last_action, acting_agent_idx, round_ended, pre_action_data, post_action_data):
+    def _calculate_reward(self, last_action, acting_agent_idx, acting_agent_hypo_winner, round_ended, pre_action_data, post_action_data):
         if self._agent_is_autoplay(acting_agent_idx):
             log.debug(f"Skipping calculating action reward for seat {acting_agent_idx} - as it is marked as an autoplay player")
             return
 
         self._load_observations()
 
-        winning_agent_idx = None
-        if self.done:
-            winning_agent_idx = self.winner_ix
+        winning_agent_idx = self.winner_ix
 
         self.reward = self.reward_policy.calculate_reward(
             env=self,
             last_action=Action(last_action),
             winning_agent_idx=winning_agent_idx,
             acting_agent_idx=acting_agent_idx,
+            acting_agent_hypo_winner=acting_agent_hypo_winner,
             round_ended=round_ended,
             post_action_data=post_action_data,
             pre_action_data=pre_action_data
@@ -440,12 +448,10 @@ class HoldemTable(Env):
             f"player pot: {self.player_pots[current_player.seat]}")
 
     def _start_new_hand(self):
-        """Deal new cards to players and reset table states."""
-        self._save_funds_history()
-
-        if self._check_game_over():
+        if self.done:
             return
 
+        """Deal new cards to players and reset table states."""
         log.info("")
         log.info("++++++++++++++++++")
         log.info("Starting new hand.")
@@ -589,6 +595,10 @@ class HoldemTable(Env):
         self.winner_ix = self._get_winner()
         self._award_winner(self.winner_ix)
 
+        self._save_funds_history()
+        if self._check_game_over():
+            return
+
     def _get_winner(self):
         """Determine which player has won the hand"""
         potential_winners = self.player_cycle.get_potential_winners()
@@ -596,17 +606,23 @@ class HoldemTable(Env):
         potential_winner_idx = [i for i, potential_winner in enumerate(potential_winners) if potential_winner]
         if sum(potential_winners) == 1:
             winner_ix = [i for i, active in enumerate(potential_winners) if active][0]
+            self._update_hypo_winner(self.players[winner_ix].cards)
             winning_card_type = 'Only remaining player in round'
 
         else:
             assert self.stage == Stage.SHOWDOWN
-            remaining_player_winner_ix, winning_card_type = get_winner([player.cards
-                                                                        for ix, player in enumerate(self.players) if
-                                                                        potential_winners[ix]],
-                                                                       self.table_cards)
+            potential_winner_cards = [player.cards for ix, player in enumerate(self.players) if potential_winners[ix]]
+            remaining_player_winner_ix, winning_card_type = get_winner(potential_winner_cards, self.table_cards)
+            self._update_hypo_winner(potential_winner_cards[remaining_player_winner_ix])
+
             winner_ix = potential_winner_idx[remaining_player_winner_ix]
         log.info(f"Player {winner_ix} won: {winning_card_type}")
         return winner_ix
+
+    def _update_hypo_winner(self, actual_winning_hand):
+        if self.acting_agent_idx is not None and len(self.players[self.acting_agent_idx].cards) == 2:
+            hypo_winner, _ = get_winner([actual_winning_hand, self.players[self.acting_agent_idx].cards], self.table_cards)
+            self.acting_agent_hypo_winner = hypo_winner == 1
 
     def _award_winner(self, winner_ix):
         """Hand the pot to the winner and handle side pots"""
@@ -634,8 +650,12 @@ class HoldemTable(Env):
             else:
                 log.info("End round - no current player returned")
                 self._end_round()
-                # todo: in some cases no new round should be initialized bc only one player is playing only it seems
-                self._initiate_round()
+                if self.player_cycle.can_enough_players_make_moves():
+                    self._initiate_round()
+                else:
+                    log.info("Ending hand - not enough players can make a move.")
+                    while self.stage != Stage.SHOWDOWN:
+                        self._end_round()
 
         elif self.current_player == 'max_steps_total' or self.current_player == 'max_steps_after_raiser':
             log.debug(self.current_player)
@@ -787,10 +807,10 @@ class PlayerCycle:
         self.can_still_make_moves_in_this_hand = []  # if the player can still play in this round
         self.alive = [True] * self.size  # if the player can still play in the following rounds
         self.out_of_cash_but_contributed = [False] * self.size
-        self.new_hand_reset()
         self.checkers = 0
         self.folder = None
         self.max_steps_when_no_raiser = self.size
+        self.new_hand_reset()
 
     def new_hand_reset(self):
         """Reset state if a new hand is dealt"""
@@ -900,6 +920,9 @@ class PlayerCycle:
                                                          np.array(self.out_of_cash_but_contributed)),
                                            np.logical_not(np.array(self.folder)))
         return potential_winners
+
+    def can_enough_players_make_moves(self):
+        return sum(np.array(self.can_still_make_moves_in_this_hand)) >= 2
 
     def _increment_idx(self, step):
         self.idx += step
